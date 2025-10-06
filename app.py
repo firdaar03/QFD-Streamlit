@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-import plotly as px
+import plotly.express as px
 import io
 import warnings
 warnings.filterwarnings('ignore')
