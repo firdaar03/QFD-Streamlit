@@ -7,6 +7,7 @@ import io
 import warnings
 warnings.filterwarnings('ignore')
 
+
 # ================== Utils (porting dari kode user) ==================
 def is_weekday(date):
     return date.weekday() < 5
