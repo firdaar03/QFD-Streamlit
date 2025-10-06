@@ -485,11 +485,11 @@ def create_gantt_chart(df_final_schedule):
         return None
     
     # Debug info
-    st.write("🔍 Debug Gantt Chart Data:")
-    st.write(f"Total rows: {len(df_final_schedule)}")
-    st.write(f"Columns: {df_final_schedule.columns.tolist()}")
-    st.write(f"PRO values: {df_final_schedule['PRO'].unique()}")
-    st.write(f"Process values: {df_final_schedule['Process'].unique()}")
+    ##st.write("🔍 Debug Gantt Chart Data:")
+    ##st.write(f"Total rows: {len(df_final_schedule)}")
+    ##st.write(f"Columns: {df_final_schedule.columns.tolist()}")
+    ##st.write(f"PRO values: {df_final_schedule['PRO'].unique()}")
+    ##st.write(f"Process values: {df_final_schedule['Process'].unique()}")
     
     # Prepare data for Gantt chart
     gantt_data = df_final_schedule.copy()
@@ -519,7 +519,7 @@ def create_gantt_chart(df_final_schedule):
         return None
     
     st.write(f"📊 Valid Gantt data rows: {len(gantt_data)}")
-    st.write("Sample of Gantt data:")
+    ##st.write("Sample of Gantt data:")
     st.dataframe(gantt_data[['PRO', 'Process', 'Start_dt', 'End_dt']].head())
     
     # Create Gantt chart
@@ -778,3 +778,5 @@ st.markdown(
     """, 
     unsafe_allow_html=True
 )
+
+Debug Gant
