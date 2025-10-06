@@ -503,7 +503,7 @@ def create_gantt_chart(df_final_schedule):
     
     # Filter out rows with missing PRO (like QFD processes)
     gantt_data = gantt_data[gantt_data['PRO'].notna()]
-    
+
     # Convert dates
     gantt_data['Start_dt'] = pd.to_datetime(gantt_data['Start'], errors='coerce')
     gantt_data['End_dt'] = pd.to_datetime(gantt_data['End'], errors='coerce')
@@ -652,7 +652,7 @@ if pn_input:
         )
     with col2:
         st.metric(
-            "Man Hour This Month", 
+            "Man Hour Available", 
             f"{man_hour_this_month:,.0f} hours",
             help="MP (331) * Efficiency (0.8) * Daily Working Hour (12.5) * 20 working days"
         )
