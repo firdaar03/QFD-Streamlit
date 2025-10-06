@@ -518,9 +518,9 @@ def create_gantt_chart(df_final_schedule):
         st.warning("No valid data available for Gantt chart after filtering")
         return None
     
-    st.write(f"📊 Valid Gantt data rows: {len(gantt_data)}")
+    ##st.write(f"📊 Valid Gantt data rows: {len(gantt_data)}")
     ##st.write("Sample of Gantt data:")
-    st.dataframe(gantt_data[['PRO', 'Process', 'Start_dt', 'End_dt']].head())
+    ##st.dataframe(gantt_data[['PRO', 'Process', 'Start_dt', 'End_dt']].head())
     
     # Create Gantt chart
     try:
