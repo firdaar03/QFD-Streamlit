@@ -435,7 +435,7 @@ def build_schedule(
 @st.cache_data
 def load_local_files():
     try:
-        Bom = pd.read_excel('BOM.xlsx')
+        Bom = pd.read_excel('Bom.xlsx')
         LT_Material = pd.read_excel('LT_Material.xlsx')
         MMBE = pd.read_excel('MMBE.xlsx')
         Subcont_Capacity = pd.read_excel('Subcont_Capacity.xlsx')
@@ -613,7 +613,7 @@ if run_btn:
     if not pn_input:
         st.error("❌ Please enter a Part Number (PN)")
     elif Bom.empty or MasterProcess.empty:
-        st.error("❌ Required files (BOM.xlsx or MasterProcess.xlsx) not found. Please ensure these files are in the same directory.")
+        st.error("❌ Required files (Bom.xlsx or MasterProcess.xlsx) not found. Please ensure these files are in the same directory.")
     else:
         with st.spinner('🔄 Building production schedule...'):
             try:
@@ -712,7 +712,7 @@ st.markdown(
     """
     <div style='text-align: center; color: #6c757d;'>
         <p>Production Scheduler App • Built with Streamlit</p>
-        <p>Ensure all Excel files (BOM.xlsx, LT_Material.xlsx, MMBE.xlsx, Subcont_Capacity.xlsx, MasterProcess.xlsx, SFS.xlsx) are in the same directory.</p>
+        <p>Ensure all Excel files (Bom.xlsx, LT_Material.xlsx, MMBE.xlsx, Subcont_Capacity.xlsx, MasterProcess.xlsx, SFS.xlsx) are in the same directory.</p>
     </div>
     """, 
     unsafe_allow_html=True
