@@ -8,3 +8,4 @@ pandas
 numpy
 >>>>>>> 37d443d24432e68bd21679c11940b60f0789a31c
 plotly
+openpyxl
