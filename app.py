@@ -448,6 +448,36 @@ def load_local_files():
         # Return empty DataFrames if files not found
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
+# ================== Calculate Man Hour Metrics ==================
+def calculate_man_hour_metrics(MasterProcess, pn_input, qty_unit):
+    """Calculate man hour metrics"""
+    if MasterProcess.empty or not pn_input:
+        return 0, 0, 0
+    
+    # Filter MasterProcess for the specific PN
+    process_data = MasterProcess[MasterProcess['PN'] == pn_input].copy()
+    
+    if process_data.empty:
+        return 0, 0, 0
+    
+    # Calculate Man Hour Requirement (total Manhour process * qty po)
+    total_manhour_per_unit = process_data['ManHour'].sum()
+    man_hour_requirement = total_manhour_per_unit * qty_unit
+    
+    # Calculate Man Hour This Month (MP * ef * daily working hour)
+    # MP = 331, ef = 0.8, daily working hour = 12.5
+    MP = 331
+    ef = 0.8
+    daily_working_hour = 12.5
+    working_days_this_month = 20  # Assuming 20 working days per month
+    
+    man_hour_this_month = MP * ef * daily_working_hour * working_days_this_month
+    
+    # Calculate Man Hour Remaining
+    man_hour_remaining = man_hour_this_month - man_hour_requirement
+    
+    return man_hour_requirement, man_hour_this_month, man_hour_remaining
+
 # ================== Improved Gantt Chart Function ==================
 def create_gantt_chart(df_final_schedule):
     """Create Gantt chart with proper data validation"""
@@ -576,6 +606,14 @@ st.markdown("""
         margin-bottom: 1rem;
         font-size: 0.9rem;
     }
+    .positive-metric {
+        color: #28a745;
+        font-weight: bold;
+    }
+    .negative-metric {
+        color: #dc3545;
+        font-weight: bold;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -583,15 +621,6 @@ st.markdown('<h1 class="main-header">🏭 Production Scheduler</h1>', unsafe_all
 
 # Load files
 Bom, LT_Material, MMBE, Subcont_Capacity, MasterProcess, SFS = load_local_files()
-
-# Show file status
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("BOM File", "Loaded" if not Bom.empty else "Not Found")
-with col2:
-    st.metric("Master Process", "Loaded" if not MasterProcess.empty else "Not Found")
-with col3:
-    st.metric("Other Files", "Available" if not (LT_Material.empty and MMBE.empty) else "Limited")
 
 # Input Section
 st.markdown('<div class="info-box">', unsafe_allow_html=True)
@@ -609,6 +638,37 @@ with col4:
 
 run_btn = st.button('🚀 Build Production Schedule', type='primary', use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
+
+# Calculate and display Man Hour metrics
+if pn_input:
+    man_hour_req, man_hour_this_month, man_hour_remaining = calculate_man_hour_metrics(MasterProcess, pn_input, qty_unit)
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric(
+            "Man Hour Requirement", 
+            f"{man_hour_req:,.0f} hours",
+            help="Total Manhour process * Quantity PO"
+        )
+    with col2:
+        st.metric(
+            "Man Hour This Month", 
+            f"{man_hour_this_month:,.0f} hours",
+            help="MP (331) * Efficiency (0.8) * Daily Working Hour (12.5) * 20 working days"
+        )
+    with col3:
+        # Determine color based on remaining hours
+        delta_color = "normal"
+        if man_hour_remaining < 0:
+            delta_color = "inverse"
+        
+        st.metric(
+            "Man Hour Remaining", 
+            f"{man_hour_remaining:,.0f} hours",
+            delta=f"{man_hour_remaining:+,.0f} hours",
+            delta_color=delta_color,
+            help="Man Hour This Month - Man Hour Requirement"
+        )
 
 if run_btn:
     if not pn_input:
