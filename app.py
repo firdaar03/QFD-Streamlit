@@ -579,7 +579,7 @@ def create_gantt_chart(df_final_schedule):
         return None
 
 # ================== Streamlit UI ==================
-st.set_page_config(page_title='Production Scheduler', layout='wide', page_icon='📊')
+st.set_page_config(page_title='Automatic QFD', layout='wide', page_icon='📊')
 
 # Custom CSS for better styling
 st.markdown("""
@@ -636,14 +636,14 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<h1 class="main-header">🏭 Production Scheduler</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header">🏭 Automatic QFD</h1>', unsafe_allow_html=True)
 
 # Load files
 Bom, LT_Material, MMBE, Subcont_Capacity, MasterProcess, SFS = load_local_files()
 
 # Input Section
 st.markdown('<div class="info-box">', unsafe_allow_html=True)
-st.subheader("📋 Production Parameters")
+st.subheader("📋 Input Data")
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
