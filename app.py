@@ -292,34 +292,29 @@ def build_schedule(
     remaining_pos.sort()
     ordered_pos.extend(remaining_pos)
 
-    # Production scheduling
+    # Production scheduling (REVISED 12.5 JAM HARIAN)
     scheduler_filtered = MasterProcess[MasterProcess['PN'] == pn_input].copy() if 'PN' in MasterProcess.columns else MasterProcess.copy()
     scheduler_filtered['ManHour'] = pd.to_numeric(scheduler_filtered.get('ManHour', 0), errors='coerce').fillna(0)
-    scheduler_filtered['Maksimal Produksi per-Base'] = pd.to_numeric(
-        scheduler_filtered.get('Maksimal Produksi per-Base', 1), errors='coerce'
-    ).fillna(1).astype(int)
 
     production_schedule = []
-    daily_capacity = {}
+    daily_hours = {}  # simpan total jam per hari
 
     for po in ordered_pos:
         row = df_compare_baseline.loc[df_compare_baseline['PO'] == po].iloc[0]
-
         incoming_end_dt = incoming_end_map.get(po, pd.NaT)
         max_end_dt = pd.to_datetime(row.get('Max_EndDate', pd.NaT), errors='coerce')
 
+        # Tentukan start produksi = sehari kerja setelah max(incoming_end, max_end_dt)
         dates_ready = [d for d in [incoming_end_dt, max_end_dt] if pd.notna(d)]
         if dates_ready:
             tentative = max(dates_ready) + timedelta(days=1)
         else:
             tentative = today + timedelta(days=1)
-
-        start_production = adjust_to_weekday(tentative)
+        current_date = adjust_to_weekday(tentative)
 
         processes_prod = scheduler_filtered.copy()
         dependency_graph = dict(zip(processes_prod['Process'], processes_prod['Dependency'].fillna('')))
         manhour_map = dict(zip(processes_prod['Process'], processes_prod['ManHour']))
-        capacity_map = dict(zip(processes_prod['Process'], processes_prod['Maksimal Produksi per-Base']))
 
         scheduled_processes = {}
         remaining = list(dependency_graph.keys())
@@ -327,55 +322,52 @@ def build_schedule(
         while remaining:
             for process in remaining[:]:
                 dep = dependency_graph.get(process, '')
-                manhour = manhour_map.get(process, 0) or 0
-                duration = manhour_to_days(manhour)
+                manhour = manhour_map.get(process, 0)
 
-                if dep == "" or dep in scheduled_processes:
-                    if dep == "":
-                        s_date = start_production
-                    else:
-                        s_date = adjust_to_weekday(scheduled_processes[dep]['end'] + timedelta(days=1))
+                # tunggu dependency selesai
+                if dep and dep not in scheduled_processes:
+                    continue
 
-                    max_per_day = capacity_map.get(process, 1)
-                    try:
-                        max_per_day = int(max_per_day)
-                    except Exception:
-                        max_per_day = 1
-                    if max_per_day <= 0:
-                        max_per_day = 1
+                # tentukan tanggal mulai berdasarkan dependency
+                if dep == '':
+                    start_date = current_date
+                else:
+                    dep_end = scheduled_processes[dep]['end']
+                    start_date = adjust_to_weekday(dep_end + timedelta(days=0))  # bisa dihari yang sama dulu
 
-                    while True:
-                        key_check = (process, s_date.strftime('%Y-%m-%d'))
-                        current_count = daily_capacity.get(key_check, 0)
-                        if current_count < max_per_day:
-                            break
-                        s_date = adjust_to_weekday(s_date + timedelta(days=1))
+                date_key = start_date.strftime('%Y-%m-%d')
+                used_hours = daily_hours.get(date_key, 0)
 
-                    current_date2 = s_date
-                    days_counted = 0
-                    while days_counted < duration:
-                        if is_weekday(current_date2):
-                            key = (process, current_date2.strftime('%Y-%m-%d'))
-                            daily_capacity[key] = daily_capacity.get(key, 0) + 1
-                            days_counted += 1
-                        current_date2 += timedelta(days=1)
+                # cek apakah muat di hari ini
+                if used_hours + manhour <= 12.5:
+                    # muat, jadi proses dilakukan di hari yang sama
+                    end_date = start_date
+                    daily_hours[date_key] = used_hours + manhour
+                else:
+                    # tidak muat, pindah ke hari kerja berikutnya
+                    next_day = adjust_to_weekday(start_date + timedelta(days=1))
+                    end_date = next_day
+                    daily_hours[next_day.strftime('%Y-%m-%d')] = manhour
+                    current_date = next_day
 
-                    e_date = calculate_end_date(s_date, duration) if duration > 0 else s_date
-                    scheduled_processes[process] = {'start': s_date, 'end': e_date}
-                    production_schedule.append({
-                        'Process': process,
-                        'Start': s_date.strftime('%Y-%m-%d'),
-                        'End': e_date.strftime('%Y-%m-%d'),
-                        'Lead Time': duration,
-                        'Note': '',
-                        'PRO': po,
-                        'Keterangan': ''
-                    })
-                    remaining.remove(process)
+                # simpan hasil schedule
+                scheduled_processes[process] = {'start': start_date, 'end': end_date}
+                production_schedule.append({
+                    "Process": process,
+                    "Start": start_date.strftime("%Y-%m-%d"),
+                    "End": end_date.strftime("%Y-%m-%d"),
+                    "Lead Time": calculate_working_days(start_date, end_date),
+                    "Note": "",
+                    "PRO": po,
+                    "Keterangan": ""
+                })
+
+                remaining.remove(process)
 
     # Final merge
     df_final_schedule = pd.DataFrame(schedule_qfd + incoming_schedule + production_schedule)
 
+    # normalisasi kolom Start/End jadi datetime jika ada, lalu format jadi YYYY-MM-DD
     if 'Start' in df_final_schedule.columns:
         df_final_schedule['Start'] = pd.to_datetime(df_final_schedule['Start'], errors='coerce').dt.strftime('%Y-%m-%d')
     else:
@@ -386,23 +378,28 @@ def build_schedule(
     else:
         df_final_schedule['End'] = pd.NaT
 
-    if 'PRO' in df_final_schedule.columns:
-        df_final_schedule['PRO'] = df_final_schedule['PRO'].map(lambda x: pro_mapping.get(x, x) if pro_mapping else x)
+    # Pastikan PRO kolom ada dan mapping jika diperlukan
+    if "PRO" in df_final_schedule.columns:
+        df_final_schedule["PRO"] = df_final_schedule["PRO"].map(lambda x: pro_mapping.get(x, x) if 'pro_mapping' in globals() else x)
     else:
-        df_final_schedule['PRO'] = df_final_schedule.get('PO', None).map(lambda x: pro_mapping.get(x, x) if pro_mapping else x)
+        df_final_schedule["PRO"] = df_final_schedule.get("PO", None).map(lambda x: pro_mapping.get(x, x) if 'pro_mapping' in globals() else x)
 
+    # Pastikan kolom Lead Time ada dengan nama 'Lead Time'
     if 'Lead Time' not in df_final_schedule.columns and 'LeadTime' in df_final_schedule.columns:
         df_final_schedule.rename(columns={'LeadTime': 'Lead Time'}, inplace=True)
     elif 'Lead Time' not in df_final_schedule.columns:
         df_final_schedule['Lead Time'] = 0
 
+    # Pastikan kolom Keterangan ada
     if 'Keterangan' not in df_final_schedule.columns:
-        df_final_schedule['Keterangan'] = ''
+        df_final_schedule['Keterangan'] = ""
 
-    cols_wanted = ['PRO','Process','Start','End','Lead Time','Keterangan']
+    # Pilih hanya kolom yang diminta dan urutkan
+    cols_wanted = ["PRO", "Process", "Start", "End", "Lead Time", "Keterangan"]
     for c in cols_wanted:
         if c not in df_final_schedule.columns:
-            df_final_schedule[c] = '' if c == 'Keterangan' else pd.NaT if c in ['Start','End'] else 0
+            # isi default supaya tidak error
+            df_final_schedule[c] = "" if c == "Keterangan" else pd.NaT if c in ["Start","End"] else 0
 
     df_final_schedule = df_final_schedule[cols_wanted].copy()
 
@@ -430,7 +427,40 @@ def build_schedule(
     df_delivery['Estimated Delivery Date'] = pd.to_datetime(df_delivery['Estimated Delivery Date'], errors='coerce').dt.strftime('%Y-%m-%d')
     df_delivery = df_delivery.sort_values(by='Estimated Delivery Date', ascending=True, na_position='last').reset_index(drop=True)
 
-    return df_final_schedule, df_material_delivery_output, df_delivery
+    # ====================== SUMMARY PROCESS ======================
+    df_summary = df_final_schedule.copy()
+    df_summary['PN'] = pn_input
+
+    # Join dengan MasterProcess untuk dapetin ProcessGroup
+    df_summary = df_summary.merge(
+        MasterProcess[['PN', 'Process', 'ProcessGroup']],
+        on=['PN', 'Process'],
+        how='left'
+    )
+
+    # Pastikan tanggal dalam format datetime
+    df_summary['Start'] = pd.to_datetime(df_summary['Start'])
+    df_summary['End'] = pd.to_datetime(df_summary['End'])
+
+    # Fungsi untuk hitung hari unik (tidak dobel di tanggal yang sama)
+    def unique_days(group):
+        days = []
+        for _, row in group.iterrows():
+            day_range = pd.date_range(row['Start'], row['End'])
+            days.extend(day_range)
+        return len(set(days))
+
+    # Hitung Lead Time unik per kombinasi PRO + ProcessGroup
+    summary_process = (
+        df_summary.groupby(['PRO', 'ProcessGroup'])
+                  .apply(unique_days)
+                  .reset_index(name='Lead Time')
+    )
+
+    # Urutkan biar rapi
+    summary_process = summary_process.sort_values(by=['PRO', 'ProcessGroup']).reset_index(drop=True)
+
+    return df_final_schedule, df_material_delivery_output, df_delivery, summary_process
 
 # ================== Load Local Files ==================
 @st.cache_data
@@ -484,13 +514,6 @@ def create_gantt_chart(df_final_schedule):
     if df_final_schedule.empty:
         return None
     
-    # Debug info
-    ##st.write("🔍 Debug Gantt Chart Data:")
-    ##st.write(f"Total rows: {len(df_final_schedule)}")
-    ##st.write(f"Columns: {df_final_schedule.columns.tolist()}")
-    ##st.write(f"PRO values: {df_final_schedule['PRO'].unique()}")
-    ##st.write(f"Process values: {df_final_schedule['Process'].unique()}")
-    
     # Prepare data for Gantt chart
     gantt_data = df_final_schedule.copy()
     
@@ -517,10 +540,6 @@ def create_gantt_chart(df_final_schedule):
     if gantt_data.empty:
         st.warning("No valid data available for Gantt chart after filtering")
         return None
-    
-    ##st.write(f"📊 Valid Gantt data rows: {len(gantt_data)}")
-    ##st.write("Sample of Gantt data:")
-    ##st.dataframe(gantt_data[['PRO', 'Process', 'Start_dt', 'End_dt']].head())
     
     # Create Gantt chart
     try:
@@ -678,7 +697,7 @@ if run_btn:
     else:
         with st.spinner('🔄 Building production schedule...'):
             try:
-                df_final_schedule, df_material_delivery_output, df_delivery = build_schedule(
+                df_final_schedule, df_material_delivery_output, df_delivery, summary_process = build_schedule(
                     Bom, LT_Material, MMBE, Subcont_Capacity, MasterProcess, SFS,
                     pn_input, int(qty_unit), pd.to_datetime(start_qfd), repeat_pn
                 )
@@ -688,7 +707,7 @@ if run_btn:
                 st.markdown('</div>', unsafe_allow_html=True)
 
                 # Display Results in Tabs
-                tab1, tab2, tab3, tab4 = st.tabs(["📅 Production Schedule", "📊 Gantt Chart", "📦 Material Delivery", "🚚 Delivery Estimates"])
+                tab1, tab2, tab3, tab4 = st.tabs(["📅 Production Schedule", "📊 Gantt Chart & Summary", "📦 Material Delivery", "🚚 Delivery Estimates"])
 
                 with tab1:
                     st.markdown('<div class="sub-header">Production Schedule</div>', unsafe_allow_html=True)
@@ -717,6 +736,36 @@ if run_btn:
                         st.plotly_chart(fig, use_container_width=True)
                     else:
                         st.warning("Unable to create Gantt chart. Check the data format above.")
+                    
+                    st.markdown("---")
+                    st.markdown('<div class="sub-header">Summary Process per PRO</div>', unsafe_allow_html=True)
+                    
+                    if not summary_process.empty:
+                        # Summary metrics for Process Group
+                        total_process_groups = summary_process['ProcessGroup'].nunique()
+                        avg_process_group_lead_time = summary_process['Lead Time'].mean()
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Total Process Groups", total_process_groups)
+                        with col2:
+                            st.metric("Avg Process Group Lead Time (days)", f"{avg_process_group_lead_time:.1f}")
+                        
+                        st.dataframe(summary_process, use_container_width=True)
+                        
+                        # Show Process Group distribution
+                        st.markdown("#### Process Group Distribution")
+                        process_group_summary = summary_process.groupby('ProcessGroup')['Lead Time'].sum().reset_index()
+                        fig_bar = px.bar(
+                            process_group_summary, 
+                            x='ProcessGroup', 
+                            y='Lead Time',
+                            title='Total Lead Time per Process Group',
+                            color='ProcessGroup'
+                        )
+                        st.plotly_chart(fig_bar, use_container_width=True)
+                    else:
+                        st.info("No summary process data available.")
 
                 with tab3:
                     st.markdown('<div class="sub-header">Material Delivery Schedule</div>', unsafe_allow_html=True)
@@ -753,6 +802,8 @@ if run_btn:
                         df_material_delivery_output.to_excel(writer, sheet_name='Material_Delivery', index=False)
                     if not df_delivery.empty:
                         df_delivery.to_excel(writer, sheet_name='Delivery_Estimates', index=False)
+                    if not summary_process.empty:
+                        summary_process.to_excel(writer, sheet_name='Summary_Process', index=False)
                 towrite.seek(0)
 
                 st.download_button(
