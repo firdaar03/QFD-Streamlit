@@ -1,0 +1,488 @@
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+from IPython.display import display
+
+# ====================== UTILITY FUNCTIONS ======================
+def is_weekday(date):
+    return date.weekday() < 5  # Senin=0
+
+def adjust_to_weekday(date):
+    d = pd.to_datetime(date)
+    while not is_weekday(d):
+        d += timedelta(days=1)
+    return d
+
+def calculate_end_date(start_date, duration):
+    if pd.isna(start_date):
+        return None
+    end_date = pd.to_datetime(start_date)
+    days_added = 0
+    while days_added < duration - 1:
+        end_date += timedelta(days=1)
+        if is_weekday(end_date):
+            days_added += 1
+    return end_date
+
+def calculate_working_days(start_str, end_str):
+    if start_str is None or end_str is None:
+        return None
+    s = pd.to_datetime(start_str, errors='coerce')
+    e = pd.to_datetime(end_str, errors='coerce')
+    if pd.isna(s) or pd.isna(e):
+        return None
+    days = np.busday_count(s.date(), (e + timedelta(days=1)).date())
+    return int(days)
+
+def calculate_calendar_days(start_dt, end_dt):
+    if pd.isna(start_dt) or pd.isna(end_dt):
+        return None
+    s = pd.to_datetime(start_dt)
+    e = pd.to_datetime(end_dt)
+    return max((e.date() - s.date()).days + 1, 1)
+
+def manhour_to_days(manhour):
+    return int(manhour / 12.5) + (0 if manhour % 12.5 == 0 else 1)
+
+
+
+def add_working_days(start_date, work_days):
+    current = pd.to_datetime(start_date)
+    added = 0
+    while added < work_days:
+        current += timedelta(days=1)
+        if is_weekday(current):
+            added += 1
+    return current
+
+# ====================== USER INPUT ======================
+pn_input = input("Masukkan Part Number (PN): ").strip()
+qty_unit = int(input("Masukkan Qty Unit: "))
+start_qfd = input("Masukkan tanggal QFD (format: YYYY-MM-DD): ")
+repeat_pn = input("Apakah PN Repeat? (Y/N): ").strip().upper()
+
+start_date = datetime.strptime(start_qfd, "%Y-%m-%d")
+
+# ====================== BASELINE / PO ALLOCATION ======================
+df_bom = (
+    Bom[Bom['PN'] == pn_input]
+    .merge(LT_Material, how='left', on='Material')
+    .merge(MMBE[['Material','Free Stock']], how='left', on='Material')
+    .fillna(1).drop_duplicates(subset=['Material','PN'])
+)
+
+po_list = []
+stock_available = df_bom.set_index("Material")["Free Stock"].to_dict()
+
+for i in range(1, qty_unit + 1):
+    tmp = df_bom.copy()
+    tmp["PO"] = f"PO{i}"
+    tmp["PN"] = pn_input
+
+    allocated_list = []
+    lt_list = []
+
+    for idx, row in tmp.iterrows():
+        material = row["Material"]
+        need = row.get("Qty", 0)
+        try:
+            need = float(need)
+        except Exception:
+            need = 0
+        available = stock_available.get(material, 0)
+
+        if available >= need:
+            allocated = need
+            lt = 0
+            stock_available[material] = available - need
+        else:
+            allocated = available
+            lt = row.get("Lead Time", 0)
+            stock_available[material] = 0
+
+        allocated_list.append(allocated)
+        lt_list.append(lt)
+
+    tmp["Allocated"] = allocated_list
+    tmp["Lead Time_Final"] = lt_list
+    po_list.append(tmp)
+
+df_po = pd.concat(po_list, ignore_index=True)
+
+# Adjustment Subcont_Capacity
+df_po = df_po.merge(
+    Subcont_Capacity[['Material','Capacity','Shifting Day']],
+    on="Material", how="left"
+)
+df_po["Adjusted_LeadTime"] = df_po["Lead Time_Final"]
+
+# filter hanya material dengan capacity (sesuai flow awal)
+#df_po = df_po[df_po['Capacity'].notna()]
+
+for material, group in df_po[df_po["Lead Time_Final"] != 0].groupby("Material"):
+    if group["Capacity"].notna().all():
+        cap = int(group["Capacity"].iloc[0])
+        shift_day = int(group["Shifting Day"].iloc[0])
+        base_lt = int(group["Lead Time_Final"].iloc[0])
+        order_idx = group.reset_index().index
+        adjusted_lt = [
+            base_lt + (i // cap) * shift_day
+            for i in order_idx
+        ]
+        df_po.loc[group.index, "Adjusted_LeadTime"] = adjusted_lt
+
+df_po['Adjusted_LeadTime'] = pd.to_numeric(df_po['Adjusted_LeadTime'], errors='coerce')
+df_max_lt = df_po.groupby(["PO","PN"])["Adjusted_LeadTime"].max().reset_index()
+df_max_lt.rename(columns={"Adjusted_LeadTime":"Max_Adjusted_LT"}, inplace=True)
+
+today = pd.to_datetime("today").normalize()
+
+df_max_lt["Material_Available_Date"] = df_max_lt["Max_Adjusted_LT"].apply(
+    lambda x: (today + timedelta(days=int(x))) if pd.notna(x) else today
+)
+
+# ====================== AMBIL MAX_ENDDATE DARI SFS ======================
+SFS = SFS.copy()
+if 'End Date' in SFS.columns:
+    SFS['End Date'] = pd.to_datetime(SFS['End Date'], errors='coerce')
+
+df_end = SFS.groupby("PN")["End Date"].max().reset_index()
+df_end.rename(columns={"End Date":"Max_EndDate"}, inplace=True)
+df_end["Max_EndDate"] = pd.to_datetime(df_end["Max_EndDate"], errors='coerce')
+
+# ====================== MERGE dan STATUS ======================
+df_compare = df_max_lt.merge(df_end, on="PN", how="left")
+df_compare["Material_Available_Date"] = pd.to_datetime(df_compare["Material_Available_Date"], errors='coerce')
+df_compare["Max_EndDate"] = pd.to_datetime(df_compare["Max_EndDate"], errors='coerce')
+
+def decide_status(row):
+    max_end = row.get("Max_EndDate", pd.NaT)
+    mat_avail = row.get("Material_Available_Date", pd.NaT)
+    if pd.isna(max_end) and pd.isna(mat_avail):
+        return "No Data"
+    if pd.isna(max_end):
+        return "Material_Available Lebih Lama"
+    if pd.isna(mat_avail):
+        return "Max_EndDate Lebih Lama"
+    if max_end > mat_avail:
+        return "Max_EndDate Lebih Lama"
+    else:
+        return "Material_Available Lebih Lama"
+
+df_compare["Status"] = df_compare.apply(decide_status, axis=1)
+df_compare_baseline = df_compare.copy()
+
+# ====================== QFD / SLA ======================
+qfd_processes = [
+    ("Design", 5), ("Workflow & Validasi", 3), ("LPPB", 2),
+    ("BOM & Routing", 1), ("Upload BOM to SAP", 1), ("Create PrO", 1),
+    ("Create PR", 1), ("Sourching Material", 3),("Release PR",2),
+    ("Create PO", 1), ("Release PO", 1)
+]
+
+start_idx = 0
+if repeat_pn == "Y":
+    for idx, (proc, dur) in enumerate(qfd_processes):
+        if proc == "Create PrO":
+            start_idx = idx
+            break
+
+schedule_qfd = []
+current_date = adjust_to_weekday(start_date)
+
+for process, duration in qfd_processes[start_idx:]:
+    end_date = calculate_end_date(current_date, duration) if duration > 0 else current_date
+    lead_time_days = max(1, calculate_working_days(current_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")))
+    schedule_qfd.append({
+        "Process": process,
+        "Start": current_date.strftime("%Y-%m-%d"),
+        "End": end_date.strftime("%Y-%m-%d"),
+        "Lead Time": lead_time_days,
+        "Note": None if duration > 0 else "Repeat PN - No Design Needed",
+        "PRO": None,
+        "Keterangan": ""   # tambahkan kolom Keterangan kosong untuk konsistensi
+    })
+    current_date = adjust_to_weekday(end_date + timedelta(days=1))
+
+# ====================== INCOMING COMPONENT PER PO (dengan Keterangan) ======================
+release_po_rows = [row for row in schedule_qfd if row["Process"] == "Release PO"]
+if len(release_po_rows) == 0:
+    raise ValueError("Tidak menemukan process 'Release PO' di schedule_qfd.")
+release_po_end = pd.to_datetime(release_po_rows[0]["End"], errors='coerce')
+
+incoming_schedule = []
+for _, row in df_compare_baseline.iterrows():
+    po = row['PO']
+    incoming_start = release_po_end
+    lt_val = None
+    if pd.notna(row.get("Max_Adjusted_LT", np.nan)):
+        try:
+            lt_val = int(row.get("Max_Adjusted_LT"))
+        except Exception:
+            lt_val = None
+
+    if lt_val is not None and lt_val >= 0:
+        incoming_end = incoming_start + timedelta(days=lt_val)
+        lead_time = lt_val
+        note = f"Based on release_po_end + Max_Adjusted_LT ({lt_val} hari kalendar)"
+    else:
+        max_end = pd.to_datetime(row.get("Max_EndDate", pd.NaT), errors='coerce')
+        mat_avail = pd.to_datetime(row.get("Material_Available_Date", pd.NaT), errors='coerce')
+        if pd.isna(max_end) and pd.isna(mat_avail):
+            incoming_end = incoming_start
+            lead_time = 1
+            note = "No data"
+        else:
+            chosen = max_end if (pd.notna(max_end) and (pd.isna(mat_avail) or max_end >= mat_avail)) else mat_avail
+            if pd.isna(chosen) or chosen < incoming_start:
+                incoming_end = incoming_start
+                lead_time = 1
+            else:
+                incoming_end = chosen
+                lead_time = calculate_calendar_days(incoming_start, incoming_end) or 1
+            note = "Fallback based on Max_EndDate/Material_Available_Date"
+
+    # Tentukan keterangan yang akan muncul di baris Incoming Component:
+    mat_avail_dt = pd.to_datetime(row.get("Material_Available_Date", pd.NaT), errors='coerce')
+    max_end_dt = pd.to_datetime(row.get("Max_EndDate", pd.NaT), errors='coerce')
+
+    if pd.notna(mat_avail_dt) and pd.notna(max_end_dt):
+        if mat_avail_dt > max_end_dt:
+            keterangan = "Waiting Material Complete"
+        elif max_end_dt > mat_avail_dt:
+            keterangan = "Waiting Capacity Available"
+        else:
+            keterangan = "On Time"
+    elif pd.notna(mat_avail_dt):
+        keterangan = "Waiting Material Complete"
+    elif pd.notna(max_end_dt):
+        keterangan = "Waiting Capacity Available"
+    else:
+        keterangan = "No Data"
+
+    incoming_schedule.append({
+        "Process": "Incoming Component",
+        "Start": incoming_start.strftime("%Y-%m-%d"),
+        "End": incoming_end.strftime("%Y-%m-%d"),
+        "Lead Time": int(lead_time),
+        "Note": note,
+        "PRO": po,
+        "Material_Available_Date": mat_avail_dt,
+        "Max_EndDate": max_end_dt,
+        "Keterangan": keterangan
+    })
+
+incoming_df = pd.DataFrame(incoming_schedule)
+incoming_df['End'] = pd.to_datetime(incoming_df['End'], errors='coerce')
+incoming_end_map = incoming_df.set_index('PRO')['End'].to_dict()
+
+# ====================== REORDER PROS BERDASARKAN incoming_end ======================
+incoming_end_sorted = incoming_df.groupby("PRO")["End"].max().sort_values(na_position='last').reset_index()
+pro_mapping = {old_pro: f"PO{i+1}" for i, old_pro in enumerate(incoming_end_sorted["PRO"])}
+
+available_pos = list(df_compare_baseline['PO'].unique())
+ordered_pos = [p for p in incoming_end_sorted['PRO'] if p in available_pos]
+remaining_pos = [p for p in available_pos if p not in ordered_pos]
+remaining_pos.sort()
+ordered_pos.extend(remaining_pos)
+
+# ====================== PRODUCTION SCHEDULING (REVISED 12.5 JAM HARIAN) ======================
+scheduler_filtered = MasterProcess[MasterProcess['PN'] == pn_input].copy()
+scheduler_filtered['ManHour'] = pd.to_numeric(scheduler_filtered.get('ManHour', 0), errors='coerce').fillna(0)
+
+production_schedule = []
+daily_hours = {}  # simpan total jam per hari
+
+for po in ordered_pos:
+    row = df_compare_baseline.loc[df_compare_baseline['PO'] == po].iloc[0]
+    incoming_end_dt = incoming_end_map.get(po, pd.NaT)
+    max_end_dt = pd.to_datetime(row.get('Max_EndDate', pd.NaT), errors='coerce')
+
+    # Tentukan start produksi = sehari kerja setelah max(incoming_end, max_end_dt)
+    dates_ready = [d for d in [incoming_end_dt, max_end_dt] if pd.notna(d)]
+    if dates_ready:
+        tentative = max(dates_ready) + timedelta(days=1)
+    else:
+        tentative = today + timedelta(days=1)
+    current_date = adjust_to_weekday(tentative)
+
+    processes_prod = scheduler_filtered.copy()
+    dependency_graph = dict(zip(processes_prod['Process'], processes_prod['Dependency'].fillna('')))
+    manhour_map = dict(zip(processes_prod['Process'], processes_prod['ManHour']))
+
+    scheduled_processes = {}
+    remaining = list(dependency_graph.keys())
+
+    while remaining:
+        for process in remaining[:]:
+            dep = dependency_graph.get(process, '')
+            manhour = manhour_map.get(process, 0)
+
+            # tunggu dependency selesai
+            if dep and dep not in scheduled_processes:
+                continue
+
+            # tentukan tanggal mulai berdasarkan dependency
+            if dep == '':
+                start_date = current_date
+            else:
+                dep_end = scheduled_processes[dep]['end']
+                start_date = adjust_to_weekday(dep_end + timedelta(days=0))  # bisa dihari yang sama dulu
+
+            date_key = start_date.strftime('%Y-%m-%d')
+            used_hours = daily_hours.get(date_key, 0)
+
+            # cek apakah muat di hari ini
+            if used_hours + manhour <= 12.5:
+                # muat, jadi proses dilakukan di hari yang sama
+                end_date = start_date
+                daily_hours[date_key] = used_hours + manhour
+            else:
+                # tidak muat, pindah ke hari kerja berikutnya
+                next_day = adjust_to_weekday(start_date + timedelta(days=1))
+                end_date = next_day
+                daily_hours[next_day.strftime('%Y-%m-%d')] = manhour
+                current_date = next_day
+
+            # simpan hasil schedule
+            scheduled_processes[process] = {'start': start_date, 'end': end_date}
+            production_schedule.append({
+                "Process": process,
+                "Start": start_date.strftime("%Y-%m-%d"),
+                "End": end_date.strftime("%Y-%m-%d"),
+                "Lead Time": calculate_working_days(start_date, end_date),
+                "Note": "",
+                "PRO": po,
+                "Keterangan": ""
+            })
+
+            remaining.remove(process)
+
+
+# ====================== FINAL MERGE ======================
+# gabungkan QFD, Incoming, dan Production. Pastikan kolom konsisten sebelum display.
+df_final_schedule = pd.DataFrame(schedule_qfd + incoming_schedule + production_schedule)
+
+# normalisasi kolom Start/End jadi datetime jika ada, lalu format jadi YYYY-MM-DD
+if 'Start' in df_final_schedule.columns:
+    df_final_schedule['Start'] = pd.to_datetime(df_final_schedule['Start'], errors='coerce').dt.strftime('%Y-%m-%d')
+else:
+    df_final_schedule['Start'] = pd.NaT
+
+if 'End' in df_final_schedule.columns:
+    df_final_schedule['End'] = pd.to_datetime(df_final_schedule['End'], errors='coerce').dt.strftime('%Y-%m-%d')
+else:
+    df_final_schedule['End'] = pd.NaT
+
+# Pastikan PRO kolom ada dan mapping jika diperlukan
+if "PRO" in df_final_schedule.columns:
+    df_final_schedule["PRO"] = df_final_schedule["PRO"].map(lambda x: pro_mapping.get(x, x) if 'pro_mapping' in globals() else x)
+else:
+    df_final_schedule["PRO"] = df_final_schedule.get("PO", None).map(lambda x: pro_mapping.get(x, x) if 'pro_mapping' in globals() else x)
+
+# Pastikan kolom Lead Time ada dengan nama 'Lead Time'
+if 'Lead Time' not in df_final_schedule.columns and 'LeadTime' in df_final_schedule.columns:
+    df_final_schedule.rename(columns={'LeadTime': 'Lead Time'}, inplace=True)
+elif 'Lead Time' not in df_final_schedule.columns:
+    df_final_schedule['Lead Time'] = 0
+
+# Pastikan kolom Keterangan ada
+if 'Keterangan' not in df_final_schedule.columns:
+    df_final_schedule['Keterangan'] = ""
+
+# Pilih hanya kolom yang diminta dan urutkan
+cols_wanted = ["PRO", "Process", "Start", "End", "Lead Time", "Keterangan"]
+for c in cols_wanted:
+    if c not in df_final_schedule.columns:
+        # isi default supaya tidak error
+        df_final_schedule[c] = "" if c == "Keterangan" else pd.NaT if c in ["Start","End"] else 0
+
+df_final_schedule = df_final_schedule[cols_wanted].copy()
+
+print("\n=== FINAL JADWAL PRODUKSI (HANYA KOLOM TERPILIH) ===")
+display(df_final_schedule)
+
+
+# ====================== SUMMARY PROCESS ======================
+print("\n=== SUMMARY PROCESS PER PRO ===")
+
+# Pastikan df_final_schedule dan MasterProcess punya kolom yang diperlukan
+df_summary = df_final_schedule.copy()
+df_summary['PN'] = pn_input  # tambahkan PN biar bisa join ke MasterProcess
+
+# Join dengan MasterProcess untuk dapetin ProcessGroup
+df_summary = df_summary.merge(
+    MasterProcess[['PN', 'Process', 'ProcessGroup']],
+    on=['PN', 'Process'],
+    how='left'
+)
+
+
+# Pastikan tanggal dalam format datetime
+df_summary['Start'] = pd.to_datetime(df_summary['Start'])
+df_summary['End'] = pd.to_datetime(df_summary['End'])
+
+# Fungsi untuk hitung hari unik (tidak dobel di tanggal yang sama)
+def unique_days(group):
+    days = []
+    for _, row in group.iterrows():
+        day_range = pd.date_range(row['Start'], row['End'])
+        days.extend(day_range)
+    return len(set(days))
+
+# Hitung Lead Time unik per kombinasi PRO + ProcessGroup
+summary_process = (
+    df_summary.groupby(['PRO', 'ProcessGroup'])
+              .apply(unique_days)
+              .reset_index(name='Lead Time')
+)
+
+# Urutkan biar rapi
+summary_process = summary_process.sort_values(by=['PRO', 'ProcessGroup']).reset_index(drop=True)
+
+display(summary_process)
+
+
+df_material_delivery = df_po.copy()
+
+# Ambil tanggal release_po_end dari QFD
+release_po_rows = [row for row in schedule_qfd if row["Process"] == "Release PO"]
+if len(release_po_rows) > 0:
+    release_po_end = pd.to_datetime(release_po_rows[0]["End"], errors='coerce')
+else:
+    release_po_end = today
+
+# Hitung Delivery Date = release_po_end + Adjusted_LeadTime
+df_material_delivery["DeliveryDate"] = df_material_delivery["Adjusted_LeadTime"].apply(
+    lambda x: release_po_end + timedelta(days=int(x)) if pd.notna(x) else release_po_end
+)
+
+# Ambil hanya kolom yang diminta
+df_material_delivery_output = df_material_delivery[[
+    "PO", "Material", "Component_Desc", "Adjusted_LeadTime", "DeliveryDate"
+]].rename(columns={
+    "PO": "PRO",
+    "Adjusted_LeadTime": "LeadTime"
+})
+
+# Format DeliveryDate ke YYYY-MM-DD
+df_material_delivery_output["DeliveryDate"] = pd.to_datetime(
+    df_material_delivery_output["DeliveryDate"], errors='coerce'
+).dt.strftime("%Y-%m-%d")
+
+print("\n=== ESTIMASI DELIVERY MATERIAL PER PO ===")
+display(df_material_delivery_output.sort_values(by="DeliveryDate", ascending=False))
+
+
+# ====================== ESTIMASI DELIVERY ======================
+pro_delivery = {}
+for pro in df_final_schedule['PRO'].dropna().unique():
+    max_date = pd.to_datetime(df_final_schedule[df_final_schedule['PRO'] == pro]['End'], errors='coerce').max()
+    pro_delivery[pro] = max_date
+
+df_delivery = pd.DataFrame(list(pro_delivery.items()), columns=["PO", "Estimated Delivery Date"])
+df_delivery["Estimated Delivery Date"] = pd.to_datetime(df_delivery["Estimated Delivery Date"], errors='coerce').dt.strftime('%Y-%m-%d')
+df_delivery = df_delivery.sort_values(by="Estimated Delivery Date", ascending=True, na_position='last').reset_index(drop=True)
+
+print("\n=== ESTIMASI DELIVERY PER PO ===")
+display(df_delivery)
