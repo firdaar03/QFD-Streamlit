@@ -743,7 +743,6 @@ def build_schedule(
         iteration_count = 0
         max_iterations = len(remaining) * 2
 
-        while remaining and iteration_count < max_iterations:
             iteration_count += 1
             for process in remaining[:]:
                 dep = dependency_graph.get(process, '')
