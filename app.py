@@ -742,9 +742,8 @@ def build_schedule(
         # STEP 3: SCHEDULE REMAINING PROCESSES
         iteration_count = 0
         max_iterations = len(remaining) * 2
-
-            iteration_count += 1
-            for process in remaining[:]:
+        iteration_count += 1
+        for process in remaining[:]:
                 dep = dependency_graph.get(process, '')
                 manhour = manhour_map.get(process, 0) or 0
                 duration = manhour_to_days(manhour)
